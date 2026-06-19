@@ -3,21 +3,13 @@ import numpy as np
 import scipy.stats as si
 import plotly.graph_objects as go
 
-# 页面基础配置（适配手机移动端）
+# 页面基础配置
 st.set_page_config(page_title="期权 IV 与盈亏计算器", layout="centered")
-
-# 🔒 【新增：初始化安全检查】防止未点击计算时页面因缺少变量崩溃
-if 'calculated_iv' not in st.session_state:
-    st.session_state['calculated_iv'] = 0.30  # 默认给一个 30% 的初始值
 
 # --- 1. 核心数学模型 ---
 def bs_price(S, K, T, r, sigma, option_type='call'):
-    if T <= 0:  # 到期时的内在价值
-        if option_type.lower() == 'call':
-            return np.maximum(0.0, S - K)
-        else:
-            return np.maximum(0.0, K - S)
-    
+    if T <= 0:
+        return np.maximum(0.0, S - K) if option_type.lower() == 'call' else np.maximum(0.0, K - S)
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     if option_type.lower() == 'call':
@@ -26,119 +18,89 @@ def bs_price(S, K, T, r, sigma, option_type='call'):
         return K * np.exp(-r * T) * si.norm.cdf(-d2) - S * si.norm.cdf(-d1)
 
 def calculate_iv(market_price, S, K, T, r, option_type='call'):
-    if option_type.lower() == 'call':
-        intrinsic = max(0.0, S - K * np.exp(-r * T))
-    else:
-        intrinsic = max(0.0, K * np.exp(-r * T) - S)
-        
+    intrinsic = max(0.0, S - K * np.exp(-r * T)) if option_type.lower() == 'call' else max(0.0, K * np.exp(-r * T) - S)
     if market_price <= intrinsic: return 0.0
-    
     low_sigma, high_sigma = 0.0001, 5.0
     while bs_price(S, K, T, r, high_sigma, option_type) < market_price:
         high_sigma *= 2
         if high_sigma > 50.0: return np.nan
-
-    for _ in range(100):
+    for _ in range(60):
         mid_sigma = (low_sigma + high_sigma) / 2.0
         mid_price = bs_price(S, K, T, r, mid_sigma, option_type)
-        if abs(mid_price - market_price) < 1e-5:
-            return mid_sigma
+        if abs(mid_price - market_price) < 1e-5: return mid_sigma
         if mid_price > market_price: high_sigma = mid_sigma
         else: low_sigma = mid_sigma
     return (low_sigma + high_sigma) / 2.0
 
 # --- 2. UI 界面设计 ---
-st.title("📊 期权 IV 反推与盈亏可视化工具")
-st.caption("支持盘中 IV 测算与未来价格变动的多维情景模拟")
+st.title("📊 期权 IV 与盈亏一体化工具")
+st.caption("单页流线型设计 · 专为手机打包 APK 优化")
+st.markdown("---")
 
-# 选项卡
-tab1, tab2 = st.tabs(["🧮 1. 反推当前 IV", "📈 2. 模拟盈亏可视化"])
+# 区域一：基础参数输入
+st.subheader("📥 1. 输入当前市场数据")
+option_type_ui = st.radio("期权类型", ["看涨期权 (Call)", "看跌期权 (Put)"], horizontal=True)
+opt_type = 'call' if "Call" in option_type_ui else 'put'
 
-with tab1:
-    st.subheader("第一步：输入盘口数据计算当前 IV")
-    option_type_ui = st.radio("期权类型", ["看涨期权 (Call)", "看跌期权 (Put)"], horizontal=True, key="t1_type")
-    opt_type = 'call' if "Call" in option_type_ui else 'put'
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        S_curr = st.number_input("当前标的价格 (S)", value=100.0, step=0.1, key="t1_S")
-        K_ui = st.number_input("期权行权价格 (K)", value=100.0, step=0.1, key="t1_K")
-    with col2:
-        days_curr = st.number_input("距离到期天数", value=14, step=1, key="t1_days")
-        r_percent = st.number_input("无风险利率 (%)", value=4.5, step=0.1, key="t1_r")
-        
-    market_price = st.number_input("当前期权市场价格 (中间价)", value=3.50, step=0.01, key="t1_mp")
-    
-    T_curr = days_curr / 365.0
-    r_val = r_percent / 100.0
-    
-    if st.button("🚀 计算当前隐含波动率 (IV)", type="primary", use_container_width=True):
-        calc_iv = calculate_iv(market_price, S_curr, K_ui, T_curr, r_val, opt_type)
-        if np.isnan(calc_iv):
-            st.error("计算失败：价格在模型中无解，请检查输入。")
-        else:
-            st.session_state['calculated_iv'] = calc_iv
-            st.success(f"### 当前隐含波动率 (IV): **{calc_iv:.2%}**")
+col1, col2 = st.columns(2)
+with col1:
+    S_curr = st.number_input("标的当前价格 (S)", value=100.0, step=0.1)
+    K_ui = st.number_input("行权价格 (K)", value=100.0, step=0.1)
+with col2:
+    days_curr = st.number_input("距离到期天数", value=14, step=1)
+    r_percent = st.number_input("无风险利率 (%)", value=4.5, step=0.1)
 
-with tab2:
-    st.subheader("第二步：模拟未来行情")
-    
-    # 从安全初始化中提取 IV
-    default_iv = st.session_state['calculated_iv']
-    if np.isnan(default_iv) or default_iv <= 0.0:
-        default_iv = 0.30
-        
-    position_direction = st.radio("你的交易方向", ["买入 (Long/做多期权)", "卖出 (Short/做空期权)"], horizontal=True)
-    sim_iv_percent = st.slider("模拟未来的 IV (%)", min_value=1.0, max_value=200.0, value=float(default_iv * 100), step=1.0)
-    
-    # 修复：防止主面板未定义天数和价格时崩溃
-    s_current_price = S_curr if 'S_curr' in locals() else 100.0
-    days_left = days_curr if 'days_curr' in locals() else 14
-    r_rate = r_val if 'r_val' in locals() else 0.045
-    k_strike = K_ui if 'K_ui' in locals() else 100.0
-    option_mode = opt_type if 'opt_type' in locals() else 'call'
-    
-    sim_days = st.slider("模拟几天后的盈亏（天数流逝）", min_value=0, max_value=int(days_left) if int(days_left) > 0 else 1, value=0)
-    
-    sim_sigma = sim_iv_percent / 100.0
-    sim_T = max(0.0, (days_left - sim_days) / 365.0)
-    pos_sign = 1.0 if "买入" in position_direction else -1.0
-    cost_basis = market_price if 'market_price' in locals() else 3.50
-    
-    s_min, s_max = s_current_price * 0.8, s_current_price * 1.2
-    s_range = np.linspace(s_min, s_max, 200)
-    
-    pnl_at_expiry = []
-    pnl_dynamic = []
-    
-    for s_step in s_range:
-        price_expiry = bs_price(s_step, k_strike, 0, r_rate, sim_sigma, option_mode)
-        pnl_at_expiry.append(pos_sign * (price_expiry - cost_basis))
-        
-        price_dyn = bs_price(s_step, k_strike, sim_T, r_rate, sim_sigma, option_mode)
-        pnl_dynamic.append(pos_sign * (price_dyn - cost_basis))
-        
-    target_s = s_current_price * 0.95
-    target_price_dyn = bs_price(target_s, k_strike, sim_T, r_rate, sim_sigma, option_mode)
-    target_pnl = pos_sign * (target_price_dyn - cost_basis)
-    
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=s_range, y=pnl_dynamic, mode='lines', name=f'{sim_days} 天后持有期盈亏', line=dict(color='#00CC96', width=3)))
-    fig.add_trace(go.Scatter(x=s_range, y=pnl_at_expiry, mode='lines', name='到期结算盈亏', line=dict(color='#636EFA', dash='dash')))
-    
-    fig.add_trace(go.Scatter(x=[s_current_price], y=[pos_sign * (bs_price(s_current_price, k_strike, days_left/365.0, r_rate, default_iv, option_mode) - cost_basis)], 
-                             mode='markers+text', name='当前标的价格点', text=["当前价"], textposition="top center", marker=dict(size=10, color='orange')))
-    
-    fig.add_trace(go.Scatter(x=[target_s], y=[target_pnl], 
-                             mode='markers+text', name='下跌 5% 预测点', text=[f"盈亏: {target_pnl:.2f}"], textposition="bottom center", marker=dict(size=12, color='red', symbol='triangle-down')))
+market_price = st.number_input("期权当前市场价 (中间价)", value=3.50, step=0.01)
 
-    fig.update_layout(
-        title=f"期权持仓损益（开仓成本: ${cost_basis:.2f}）",
-        xaxis_title="未来标的资产价格 (S)",
-        yaxis_title="单手盈亏金额 ($)",
-        hovermode="x unified",
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-        margin=dict(l=20, r=20, t=40, b=20)
-    )
-    fig.add_hline(y=0, line_dash="solid", line_color="grey", opacity=0.5)
-    st.plotly_chart(fig, use_container_width=True)
+T_curr = days_curr / 365.0
+r_val = r_percent / 100.0
+
+# 实时自动计算当前 IV
+current_iv = calculate_iv(market_price, S_curr, K_ui, T_curr, r_val, opt_type)
+if np.isnan(current_iv) or current_iv <= 0:
+    current_iv = 0.30  # 异常容错默认值
+st.metric(label="📈 当前市场反推隐含波动率 (IV)", value=f"{current_iv:.2%}")
+
+st.markdown("---")
+
+# 区域二：情景模拟滑块
+st.subheader("🔮 2. 模拟未来行情变动")
+position_direction = st.radio("你的持仓方向", ["买入 (Long / 做多期权)", "卖出 (Short / 做空期权)"], horizontal=True)
+sim_iv_percent = st.slider("模拟未来的 IV (%)", min_value=1.0, max_value=200.0, value=float(current_iv * 100), step=1.0)
+sim_days = st.slider("模拟几天后的盈亏 (天数流逝)", min_value=0, max_value=int(days_curr) if int(days_curr) > 0 else 1, value=0)
+
+# --- 3. 盈亏数据生成与作图 ---
+sim_sigma = sim_iv_percent / 100.0
+sim_T = max(0.0, (days_curr - sim_days) / 365.0)
+pos_sign = 1.0 if "买入" in position_direction else -1.0
+
+s_range = np.linspace(S_curr * 0.8, S_curr * 1.2, 150)
+pnl_at_expiry = [pos_sign * (bs_price(s, K_ui, 0, r_val, sim_sigma, opt_type) - market_price) for s in s_range]
+pnl_dynamic = [pos_sign * (bs_price(s, K_ui, sim_T, r_val, sim_sigma, opt_type) - market_price) for s in s_range]
+
+target_s = S_curr * 0.95
+target_pnl = pos_sign * (bs_price(target_s, K_ui, sim_T, r_val, sim_sigma, opt_type) - market_price)
+
+# 绘图
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=s_range, y=pnl_dynamic, mode='lines', name=f'{sim_days}天后动态盈亏', line=dict(color='#00CC96', width=3)))
+fig.add_trace(go.Scatter(x=s_range, y=pnl_at_expiry, mode='lines', name='到期结算盈亏', line=dict(color='#636EFA', dash='dash')))
+fig.add_trace(go.Scatter(x=[S_curr], y=[pos_sign * (bs_price(S_curr, K_ui, T_curr, r_val, current_iv, opt_type) - market_price)], mode='markers', name='当前价格点', marker=dict(size=10, color='orange')))
+fig.add_trace(go.Scatter(x=[target_s], y=[target_pnl], mode='markers+text', name='下跌 5% 预测点', text=[f"盈亏: {target_pnl:.2f}"], textposition="bottom center", marker=dict(size=12, color='red', symbol='triangle-down')))
+
+fig.update_layout(
+    title="期权持仓损益模拟图",
+    xaxis_title="未来标的资产价格",
+    yaxis_title="盈亏金额",
+    hovermode="x unified",
+    margin=dict(l=15, r=15, t=40, b=15),
+    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+)
+fig.add_hline(y=0, line_dash="solid", line_color="grey", opacity=0.3)
+
+# ⭐ 使用带有动态参数的 key，彻底避免 removeChild 前端报错
+st.plotly_chart(fig, use_container_width=True, key=f"pnl_chart_{sim_days}_{sim_iv_percent}_{opt_type}")
+
+st.markdown(f"""
+* **情景结果**：若 **{sim_days}** 天后标的跌至 **${target_s:.2f}**（-5%），在 IV 为 **{sim_iv_percent}%** 的情况下，单手预估盈亏为：{"🔴 **亏损**" if target_pnl < 0 else "🟢 **盈利**"} **${abs(target_pnl):.2f}**。
+""")
