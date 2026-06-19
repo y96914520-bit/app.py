@@ -4,21 +4,29 @@ import scipy.stats as si
 import plotly.graph_objects as go
 
 # ==========================================
-# 页面配置 (移动端优化)
+# 页面配置 (移动端 & 窄屏优化)
 # ==========================================
 st.set_page_config(
-    page_title="期权 IV 反推与 PnL 分析器",
-    layout="centered", # 居中布局更适合手机屏幕
+    page_title="期权多腿策略分析器",
+    layout="centered",
     initial_sidebar_state="collapsed"
 )
 
+# 注入自定义 CSS 以优化移动端间距
+st.markdown("""
+    <style>
+    .block-container { padding-top: 2rem; padding-bottom: 2rem; }
+    .stButton>button { width: 100%; border-radius: 10px; }
+    </style>
+""", unsafe_allow_html=True)
+
 # ==========================================
-# 核心业务逻辑：期权定价与 IV 反推
+# 核心业务逻辑：BS 模型与 IV 计算
 # ==========================================
 def bs_price(S, K, T, r, sigma, option_type):
-    """Black-Scholes 期权定价模型"""
     if T <= 0:
-        return np.maximum(S - K, 0) if option_type == 'Call' else np.maximum(K - S, 0)
+        if option_type == 'Call': return np.maximum(S - K, 0)
+        else: return np.maximum(K - S, 0)
     
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
@@ -28,141 +36,155 @@ def bs_price(S, K, T, r, sigma, option_type):
     else:
         return K * np.exp(-r * T) * si.norm.cdf(-d2) - S * si.norm.cdf(-d1)
 
-def calculate_iv_bisection(target_price, S, K, T, r, option_type):
-    """使用二分法稳定反推隐含波动率 (Bisection Method)"""
-    # 边界与内在价值检查
-    intrinsic_value = max(0.0, S - K * np.exp(-r * T)) if option_type == 'Call' else max(0.0, K * np.exp(-r * T) - S)
-    if target_price < intrinsic_value:
-        return None # 市场价格低于内在价值，无解或存在套利空间
-    if T <= 0:
-        return None
-        
-    low, high = 1e-4, 5.0 # IV 搜索范围 0.01% - 500%
-    tol = 1e-5
+def calculate_iv(target_price, S, K, T, r, option_type):
+    intrinsic = max(0.0, S - K * np.exp(-r * T)) if option_type == 'Call' else max(0.0, K * np.exp(-r * T) - S)
+    if target_price <= intrinsic: return 0.15 # 默认值
     
-    for _ in range(100): # 最大迭代次数 100 次
+    low, high = 1e-4, 5.0
+    for _ in range(50):
         mid = (low + high) / 2.0
-        price_mid = bs_price(S, K, T, r, mid, option_type)
-        
-        if abs(price_mid - target_price) < tol:
-            return mid
-        if price_mid > target_price:
-            high = mid
-        else:
-            low = mid
-            
-    return (low + high) / 2.0
+        p = bs_price(S, K, T, r, mid, option_type)
+        if p > target_price: high = mid
+        else: low = mid
+    return mid
 
 # ==========================================
-# 前端界面构建 (流线型上下结构)
+# 状态管理：管理多腿持仓
 # ==========================================
-st.title("📈 期权 IV 与动态盈亏分析")
+if 'legs' not in st.session_state:
+    st.session_state.legs = []
+
+def add_leg():
+    st.session_state.legs.append({
+        'side': 'Long',
+        'type': 'Call',
+        'strike': 100.0,
+        'mkt_price': 3.0,
+        'qty': 1
+    })
+
+def remove_leg(index):
+    st.session_state.legs.pop(index)
+
+# ==========================================
+# UI 布局
+# ==========================================
+st.title("🧩 自定义期权策略分析")
+
+# 1. 基础环境参数
+with st.expander("🌍 市场环境设置", expanded=True):
+    col_env1, col_env2 = st.columns(2)
+    with col_env1:
+        S_curr = st.number_input("标的当前价格", value=100.0, step=1.0)
+    with col_env2:
+        r_val = st.number_input("无风险利率 (%)", value=3.0) / 100.0
+    t_days = st.number_input("距离到期总天数", value=30, step=1)
+
 st.markdown("---")
 
-st.subheader("1. 输入期权市场参数")
-col1, col2 = st.columns(2)
-with col1:
-    option_type = st.selectbox("期权类型", ["Call", "Put"])
-    S = st.number_input("标的价格 (S)", value=100.0, step=1.0)
-    K = st.number_input("行权价 (K)", value=100.0, step=1.0)
-with col2:
-    market_price = st.number_input("市场现价", value=3.00, step=0.1)
-    T_days = st.number_input("到期天数 (T)", value=30, step=1)
-    r_pct = st.number_input("无风险利率 (%)", value=3.0, step=0.1)
+# 2. 持仓腿管理
+st.subheader("🛠️ 策略构成 (Legs)")
+if st.button("➕ 添加新期权腿"):
+    add_leg()
 
-T_years = T_days / 365.0
-r = r_pct / 100.0
+total_entry_cost = 0.0
+processed_legs = []
 
-# 计算 IV
-iv = calculate_iv_bisection(market_price, S, K, T_years, r, option_type)
+for i, leg in enumerate(st.session_state.legs):
+    with st.container():
+        # 为每条腿创建一个卡片式布局
+        st.markdown(f"**Leg #{i+1}**")
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            leg['side'] = st.selectbox(f"方向##{i}", ["Long", "Short"], index=0 if leg['side']=='Long' else 1, key=f"side_{i}")
+            leg['type'] = st.selectbox(f"类型##{i}", ["Call", "Put"], index=0 if leg['type']=='Call' else 1, key=f"type_{i}")
+        with c2:
+            leg['strike'] = st.number_input(f"行权价##{i}", value=leg['strike'], key=f"k_{i}")
+            leg['mkt_price'] = st.number_input(f"成交价格##{i}", value=leg['mkt_price'], key=f"p_{i}")
+        with c3:
+            leg['qty'] = st.number_input(f"手数##{i}", value=leg['qty'], min_value=1, key=f"q_{i}")
+            if st.button(f"🗑️ 删除##{i}", key=f"del_{i}"):
+                remove_leg(i)
+                st.rerun()
+        
+        # 计算该腿的 IV 和成本
+        leg_iv = calculate_iv(leg['mkt_price'], S_curr, leg['strike'], t_days/365.0, r_val, leg['type'])
+        multiplier = 1 if leg['side'] == 'Long' else -1
+        total_entry_cost += leg['mkt_price'] * leg['qty'] * multiplier
+        
+        processed_legs.append({**leg, 'iv': leg_iv, 'multiplier': multiplier})
+        st.markdown("---")
 
-if iv is None:
-    st.error("⚠️ 无法计算 IV：期权市场价格低于理论内在价值（或已到期）。请检查输入数据！")
+if not processed_legs:
+    st.info("请点击上方按钮添加期权腿来构建策略。")
     st.stop()
 
-st.success(f"**反推隐含波动率 (IV): {iv * 100:.2f}%**")
-
-st.markdown("---")
-st.subheader("2. 情景模拟与 PnL 分析")
-
-# 模拟参数滑块
-sim_days_passed = st.slider("时间流逝 (天)", min_value=0, max_value=int(T_days), value=0, step=1)
-sim_iv_change_pct = st.slider("IV 变动预测 (绝对百分比 %)", min_value=-50.0, max_value=50.0, value=0.0, step=1.0)
-# 虽然直接在图表上标记了 -5%，但也提供自定义的标的价格预测滑块用于灵活性
-sim_S_change_pct = st.slider("标的价格预测变动 (%)", min_value=-30.0, max_value=30.0, value=-5.0, step=1.0)
+# 3. 模拟滑块 (情景分析)
+st.subheader("📈 模拟预测分析")
+col_sim1, col_sim2 = st.columns(2)
+with col_sim1:
+    days_passed = st.slider("时间经过 (天)", 0, t_days, 0)
+with col_sim2:
+    iv_move = st.slider("未来 IV 变动 (%)", -50, 50, 0)
 
 # ==========================================
-# 数据计算与可视化
+# 计算总盈亏曲线
 # ==========================================
-T_sim_years = max((T_days - sim_days_passed) / 365.0, 1e-5) # 防止时间为0导致除零错误
-iv_sim = max(iv + (sim_iv_change_pct / 100.0), 1e-4) # 防止 IV 为负
+s_range = np.linspace(S_curr * 0.7, S_curr * 1.3, 200)
+t_remaining = max((t_days - days_passed) / 365.0, 1e-5)
 
-# 生成 X 轴数据 (标的价格变动区间 -30% 到 +30%)
-S_array = np.linspace(S * 0.7, S * 1.3, 200)
+def get_combined_pnl(S_target, is_expiry=False):
+    total_val = 0.0
+    for leg in processed_legs:
+        if is_expiry:
+            # 到期价值
+            if leg['type'] == 'Call': val = max(S_target - leg['strike'], 0)
+            else: val = max(leg['strike'] - S_target, 0)
+        else:
+            # 动态 BS 价值
+            sim_iv = max(leg['iv'] + iv_move/100.0, 1e-4)
+            val = bs_price(S_target, leg['strike'], t_remaining, r_val, sim_iv, leg['type'])
+        
+        total_val += val * leg['qty'] * leg['multiplier']
+    return total_val - total_entry_cost
 
-# 1. 计算到期结算 PnL (虚线)
-if option_type == 'Call':
-    pnl_expiry = np.maximum(S_array - K, 0) - market_price
-else:
-    pnl_expiry = np.maximum(K - S_array, 0) - market_price
+pnl_expiry = [get_combined_pnl(s, True) for s in s_range]
+pnl_dynamic = [get_combined_pnl(s, False) for s in s_range]
+curr_pnl = get_combined_pnl(S_curr, False)
 
-# 2. 计算动态持有期 PnL (实线)
-prices_dynamic = np.array([bs_price(s, K, T_sim_years, r, iv_sim, option_type) for s in S_array])
-pnl_dynamic = prices_dynamic - market_price
-
-# 计算特定预测点的动态 PnL
-# (a) 当前价格点
-current_pnl = bs_price(S, K, T_sim_years, r, iv_sim, option_type) - market_price
-# (b) 指定预测变化点 (默认体现下跌5%的设计要求)
-target_S = S * (1 + sim_S_change_pct / 100.0)
-target_pnl = bs_price(target_S, K, T_sim_years, r, iv_sim, option_type) - market_price
-
-# 绘制 Plotly 图表
+# ==========================================
+# 可视化 (严格执行 Unique Key 防崩溃)
+# ==========================================
 fig = go.Figure()
 
-# 到期 PnL 虚线
+fig.add_trace(go.Scatter(x=s_range, y=pnl_expiry, name="到期盈亏", line=dict(dash='dash', color='gray')))
+fig.add_trace(go.Scatter(x=s_range, y=pnl_dynamic, name=f"{days_passed}天后盈亏", line=dict(color='#00BFFF', width=3)))
+
+# 标记当前点
 fig.add_trace(go.Scatter(
-    x=S_array, y=pnl_expiry, 
-    mode='lines', name='到期结算 PnL',
-    line=dict(dash='dash', color='gray')
+    x=[S_curr], y=[curr_pnl],
+    mode='markers+text',
+    text=[f"当前: {curr_pnl:.2f}"],
+    textposition="top center",
+    marker=dict(size=12, color='orange', symbol='diamond')
 ))
 
-# 动态 PnL 实线
-fig.add_trace(go.Scatter(
-    x=S_array, y=pnl_dynamic, 
-    mode='lines', name=f'{sim_days_passed}天后动态 PnL',
-    line=dict(color='#00BFFF', width=3)
-))
-
-# 标记【当前价格点】
-fig.add_trace(go.Scatter(
-    x=[S], y=[current_pnl],
-    mode='markers+text', name='当前标的价格',
-    marker=dict(color='orange', size=12, symbol='star'),
-    text=[f"S={S:.2f}<br>PnL={current_pnl:.2f}"],
-    textposition="top center"
-))
-
-# 标记【预测价格点】
-fig.add_trace(go.Scatter(
-    x=[target_S], y=[target_pnl],
-    mode='markers+text', name=f'预测价格 ({sim_S_change_pct}%)',
-    marker=dict(color='red', size=10),
-    text=[f"S={target_S:.2f}<br>PnL={target_pnl:.2f}"],
-    textposition="bottom center"
-))
-
-# 图表布局美化，适配移动端窄屏
 fig.update_layout(
-    title=f"持仓盈亏模拟 (期权成本: {market_price:.2f})",
+    title="策略合成损益图",
     xaxis_title="标的价格",
-    yaxis_title="盈亏 (PnL)",
-    hovermode="x unified",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    margin=dict(l=10, r=10, t=50, b=10) # 减少边缘留白，适配手机端
+    yaxis_title="组合总盈亏",
+    template="plotly_white",
+    legend=dict(orientation="h", y=1.1),
+    margin=dict(l=10, r=10, t=40, b=10),
+    hovermode="x unified"
 )
-fig.add_hline(y=0, line_dash="solid", line_color="red", opacity=0.5)
+fig.add_hline(y=0, line_color="red", opacity=0.3)
 
-# 渲染图表：使用动态唯一 Key 彻底解决 React DOM Bug
-unique_chart_key = f"pnl_chart_{sim_days_passed}_{sim_iv_change_pct}_{sim_S_change_pct}"
-st.plotly_chart(fig, use_container_width=True, key=unique_chart_key)
+# 彻底根除 DOM 渲染 Bug
+chart_key = f"multileg_chart_{len(processed_legs)}_{days_passed}_{iv_move}_{S_curr}"
+st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+# 4. 统计摘要
+st.sidebar.markdown(f"### 策略摘要")
+st.sidebar.write(f"初期总支出/收入: {total_entry_cost:.2f}")
+st.sidebar.write(f"当前模拟盈亏: {curr_pnl:.2f}")
